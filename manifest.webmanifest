@@ -1,0 +1,14 @@
+{
+  "name": "Salaar AI - Intelligence for Your Ambition",
+  "short_name": "Salaar AI",
+  "description": "Intelligence for Your Ambition - Created by Yahya Salaar Hassan",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#080910",
+  "theme_color": "#080910",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/assets/logo.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/assets/logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

@@ -1,385 +1,169 @@
-"use strict";
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import multer from "multer";
+import PDFDocument from "pdfkit";
 
-const express = require("express");
-const dotenv = require("dotenv");
-const path = require("path");
-const fs = require("fs");
-const { GoogleGenAI } = require("@google/genai");
-
-dotenv.config({
-  path: path.join(__dirname, ".env")
-});
-
+dotenv.config();
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = process.env.PORT || 3000;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TEXT_MODEL =
-  process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
-const IMAGE_MODEL =
-  process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+app.use(cors());
+app.use(express.json({ limit: "25mb" }));
+app.use(express.static("."));
 
-const ai = GEMINI_API_KEY
-  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
-  : null;
+const GROQ_KEY = process.env.GROQ_API_KEY;
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GROQ_MODEL = process.env.GROQ_TEXT_MODEL || "openai/gpt-oss-120b";
 
-app.disable("x-powered-by");
-
-app.use(express.json({ limit: "15mb" }));
-
-// Serve only the frontend and its assets.
-// Do not expose server.js, .env, package files, or node_modules.
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
-
-app.use(
-  "/assets",
-  express.static(path.join(__dirname, "assets"), {
-    dotfiles: "deny",
-    index: false
-  })
-);
-
-// Backend status endpoint.
-app.get("/api/status", (req, res) => {
-  res.json({
-    message: "Salaar AI backend is running",
-    geminiConfigured: Boolean(ai),
-    textModel: TEXT_MODEL,
-    imageModel: IMAGE_MODEL
-  });
-});
-
-// Gemini text chat endpoint.
-// Gemini text and image chat endpoint.
-app.post("/api/chat", async (req, res) => {
+// LIST AVAILABLE MODELS FOR YOUR AQ. KEY
+async function listGeminiModels() {
   try {
-    if (!ai) {
-      return res.status(503).json({
-        error: "Gemini API key is missing. Check your .env file."
-      });
-    }
-
-    const body = req.body || {};
-    const message = body.message;
-    const image = body.image;
-
-    // Require a text message or an image.
-    if (
-      (typeof message !== "string" || !message.trim()) &&
-      !image
-    ) {
-      return res.status(400).json({
-        error: "Please enter a message or attach an image."
-      });
-    }
-
-    if (typeof message === "string" && message.length > 20000) {
-      return res.status(413).json({
-        error: "Your message is too long. Please shorten it."
-      });
-    }
-
-    // Validate the attached image.
-    const imageParts = [];
-
-    if (image !== null && image !== undefined) {
-      if (
-        typeof image !== "object" ||
-        typeof image.base64 !== "string" ||
-        typeof image.mimeType !== "string"
-      ) {
-        return res.status(400).json({
-          error: "The attached image data is invalid."
-        });
-      }
-
-      const allowedImageTypes = [
-        "image/jpeg",
-        "image/png",
-        "image/webp",
-        "image/gif"
-      ];
-
-      if (!allowedImageTypes.includes(image.mimeType)) {
-        return res.status(400).json({
-          error: "Please attach a JPEG, PNG, WEBP, or GIF image."
-        });
-      }
-
-      // Five MB maximum for the decoded image.
-      const estimatedBytes = Math.floor(
-        image.base64.length * 3 / 4
-      );
-
-      if (
-        !image.base64 ||
-        !/^[A-Za-z0-9+/]*={0,2}$/.test(image.base64) ||
-        estimatedBytes > 5 * 1024 * 1024
-      ) {
-        return res.status(400).json({
-          error: "The image is invalid or exceeds the 5 MB limit."
-        });
-      }
-
-      imageParts.push({
-        inlineData: {
-          mimeType: image.mimeType,
-          data: image.base64
-        }
-      });
-    }
-
-    // Convert conversation history to Gemini format.
-    const history = Array.isArray(body.history)
-      ? body.history
-          .filter((item) => {
-            const content =
-              typeof item?.text === "string"
-                ? item.text
-                : item?.content;
-
-            return (
-              item &&
-              ["user", "assistant", "model"].includes(item.role) &&
-              typeof content === "string" &&
-              content.trim()
-            );
-          })
-          .slice(-12)
-          .map((item) => {
-            const content =
-              typeof item.text === "string"
-                ? item.text
-                : item.content;
-
-            return {
-              role:
-                item.role === "assistant" || item.role === "model"
-                  ? "model"
-                  : "user",
-              parts: [
-                {
-                  text: content.slice(0, 12000)
-                }
-              ]
-            };
-          })
-      : [];
-
-    // Build the current message, including the image if attached.
-    const currentParts = [];
-
-    if (typeof message === "string" && message.trim()) {
-      currentParts.push({
-        text: message.trim()
-      });
-    }
-
-    currentParts.push(...imageParts);
-
-    const response = await ai.models.generateContent({
-      model: TEXT_MODEL,
-
-      contents: [
-        ...history,
-        {
-          role: "user",
-          parts: currentParts
-        }
-      ],
-
-      config: {
-        systemInstruction: `You are Salaar AI, an AI assistant built by Yahya Salaar Hassan.
-
-When asked who you are, say:
-"Hello, I am Salaar AI, an AI model built by Yahya Salaar Hassan. I am here to help you answer questions, generate content, and solve problems."
-
-Write clean, professional, easy-to-read answers.
-Avoid Markdown formatting symbols such as **, ##, and ###.
-Use plain headings, numbered lists, and simple bullet points.
-Separate paragraphs with blank lines.
-Answer questions directly and accurately.
-
-When a user attaches an image, examine the image and answer their question about its visible contents.`
-      }
+    const url = "https://generativelanguage.googleapis.com/v1beta/models";
+    const res = await fetch(url, {
+      headers: { "x-goog-api-key": GEMINI_KEY }
     });
-
-    const reply = response.text;
-
-    if (typeof reply !== "string" || !reply.trim()) {
-      return res.status(502).json({
-        error: "Gemini returned an empty response. Please try again."
-      });
-    }
-
-    return res.json({ reply });
-
-  } catch (error) {
-    console.error("Gemini chat error:", error.message);
-
-    return res.status(500).json({
-      error:
-        "Chat failed. Check your Gemini API key, model access, internet connection, and API quota."
-    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message);
+    return data.models?.map(m => m.name.replace("models/","")) || [];
+  } catch (e) {
+    console.log("ListModels failed:", e.message);
+    return [];
   }
+}
+
+async function callGemini(prompt, images = [], pdfBuffer = null) {
+  if (!GEMINI_KEY) throw new Error("GEMINI_API_KEY missing");
+  
+  const parts = [{ text: prompt || "Analyze" }];
+  for (const img of images) {
+    parts.push({ inline_data: { mime_type: img.mime, data: img.base64 } });
+  }
+  if (pdfBuffer) {
+    parts.push({ inline_data: { mime_type: "application/pdf", data: pdfBuffer.toString("base64") } });
+  }
+
+  // 1. Get real models available for THIS key
+  let available = await listGeminiModels();
+  console.log("Available models for your key:", available);
+
+  // 2. Preferred order for 2026 AQ. keys
+  const preferred = [
+    "gemini-3.8-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-001",
+    "gemini-flash-latest"
+  ];
+
+  // 3. Use intersection of available + preferred, or try preferred anyway
+  let toTry = available.length > 0 ? preferred.filter(p => available.includes(p)).concat(available.filter(m => m.includes("flash"))) : preferred;
+  // dedup
+  toTry = [...new Set(toTry)];
+
+  let lastError = null;
+  for (const model of toTry) {
+    try {
+      console.log(`→ Trying ${model} ...`);
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        lastError = data.error?.message || res.statusText;
+        console.log(`  ✗ ${model} failed: ${lastError.slice(0,150)}`);
+        continue;
+      }
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        console.log(`  ✅ SUCCESS with ${model}`);
+        return text;
+      }
+    } catch (e) { lastError = e.message; continue; }
+  }
+  throw new Error(`Gemini all models failed: ${lastError}. Available: ${available.join(', ')}. Get new key: https://aistudio.google.com/app/apikey`);
+}
+
+async function callGroq(prompt) {
+  if (!GROQ_KEY) throw new Error("GROQ_API_KEY missing");
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GROQ_KEY}` },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [
+        { role: "system", content: "You are Salaar AI. Created by Yahya Salaar Hassan. Plain text only, no ** # *" },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 4000
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Groq ${res.status}`);
+  return data.choices?.[0]?.message?.content;
+}
+
+app.get("/api/status", async (req, res) => {
+  let groqOk = false, geminiOk = false, list = [];
+  try { await callGroq("hi"); groqOk = true; } catch {}
+  try { list = await listGeminiModels(); geminiOk = list.length > 0; } catch {}
+  res.json({ connected: groqOk || geminiOk, groq: groqOk, gemini: geminiOk, availableModels: list, groqModel: GROQ_MODEL });
 });
 
-// Gemini image-generation endpoint.
-app.post("/api/image", async (req, res) => {
+app.post("/api/chat", upload.array("files", 5), async (req, res) => {
   try {
-    if (!ai) {
-      return res.status(503).json({
-        error: "Gemini API key is missing. Check your .env file."
-      });
-    }
-
-    const body = req.body || {};
-    const prompt = body.prompt;
-
-    if (typeof prompt !== "string" || !prompt.trim()) {
-      return res.status(400).json({
-        error: "Please describe the image you want to generate."
-      });
-    }
-
-    if (prompt.length > 5000) {
-      return res.status(413).json({
-        error: "Your image prompt is too long. Please shorten it."
-      });
-    }
-
-    const allowedAspectRatios = [
-      "1:1",
-      "2:3",
-      "3:2",
-      "3:4",
-      "4:3",
-      "4:5",
-      "5:4",
-      "9:16",
-      "16:9",
-      "21:9"
-    ];
-
-    const allowedImageSizes = ["1K", "2K", "4K"];
-
-    const aspectRatio = allowedAspectRatios.includes(
-      body.aspectRatio
-    )
-      ? body.aspectRatio
-      : "1:1";
-
-    const imageSize = allowedImageSizes.includes(body.imageSize)
-      ? body.imageSize
-      : "1K";
-
-    // The Google GenAI SDK's image-generation model uses generateContent.
-    const response = await ai.models.generateContent({
-      model: IMAGE_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: prompt.trim()
-            }
-          ]
-        }
-      ],
-      config: {
-        responseModalities: ["TEXT", "IMAGE"],
-        imageConfig: {
-          aspectRatio,
-          imageSize
-        }
-      }
-    });
-
-    let imageBase64 = null;
-    let mimeType = "image/png";
-    let textResponse = "";
-
-    const parts =
-      response.candidates &&
-      response.candidates[0] &&
-      response.candidates[0].content &&
-      response.candidates[0].content.parts;
-
-    if (Array.isArray(parts)) {
-      for (const part of parts) {
-        if (part.text) {
-          textResponse += part.text;
-        }
-
-        if (part.inlineData && part.inlineData.data) {
-          imageBase64 = part.inlineData.data;
-          mimeType = part.inlineData.mimeType || "image/png";
-        }
+    const prompt = req.body.message || "";
+    const images = []; let pdfBuffer = null;
+    if (req.files) {
+      for (const f of req.files) {
+        if (f.mimetype.startsWith("image/")) images.push({ base64: f.buffer.toString("base64"), mime: f.mimetype });
+        else if (f.mimetype === "application/pdf") pdfBuffer = f.buffer;
       }
     }
-
-    if (!imageBase64) {
-      console.error("Gemini did not return image data.");
-
-      return res.status(502).json({
-        error:
-          "Gemini did not return an image. Check image-model availability and API access."
-      });
+    if (!prompt && images.length===0 && !pdfBuffer) return res.status(400).json({ error: "Message required" });
+    let reply;
+    if (images.length > 0 || pdfBuffer) {
+      reply = await callGemini(prompt || "What is in this image?", images, pdfBuffer);
+    } else {
+      try { reply = await callGroq(prompt); }
+      catch { reply = await callGemini(prompt); }
     }
-
-    return res.json({
-      imageBase64,
-      mimeType,
-      text: textResponse
-    });
-  } catch (error) {
-    console.error("Gemini image-generation error:", error.message);
-
-    return res.status(500).json({
-      error:
-        "Image generation failed. Check the image model, API access, and usage limits."
-    });
-  }
+    reply = reply.replace(/\*\*(.*?)\*\*/g, "$1");
+    res.json({ reply });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// Return JSON for unknown API routes.
-app.use("/api", (req, res) => {
-  res.status(404).json({
-    error: "API endpoint not found."
-  });
+app.post("/api/analyze-pdf", upload.single("pdf"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No PDF" });
+    const q = req.body.question || "Summarize this PDF";
+    const answer = await callGemini(q, [], req.file.buffer);
+    res.json({ reply: answer });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Handle malformed JSON requests.
-app.use((error, req, res, next) => {
-  if (res.headersSent) {
-    return next(error);
-  }
-
-  if (error instanceof SyntaxError && error.status === 400) {
-    return res.status(400).json({
-      error: "Invalid JSON request."
-    });
-  }
-
-  console.error("Server error:", error.message);
-
-  return res.status(500).json({
-    error: "An unexpected server error occurred."
-  });
+app.post("/api/create-pdf", (req, res) => {
+  const { content, title } = req.body;
+  if (!content) return res.status(400).json({ error: "Content required" });
+  const doc = new PDFDocument();
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${(title||'doc').replace(/[^a-z0-9]/gi,'_')}.pdf"`);
+  doc.pipe(res); doc.fontSize(20).text(title || "Salaar AI"); doc.moveDown(); doc.fontSize(12).text(content); doc.end();
 });
 
-// Start the server.
-app.listen(PORT, () => {
-  console.log("");
-  console.log("====================================");
-  console.log("         SALAAR AI SERVER");
-  console.log("====================================");
-  console.log(`Website: http://localhost:${PORT}`);
-  console.log(`Gemini configured: ${Boolean(ai)}`);
-  console.log(`Text model: ${TEXT_MODEL}`);
-  console.log(`Image model: ${IMAGE_MODEL}`);
-  console.log("====================================");
-  console.log("");
-});
+// For Vercel - Don't listen in production, export app
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => console.log(`✅ Salaar AI http://localhost:${PORT} - Groq: ${GROQ_MODEL} - Gemini 3.8-flash - AQ. Supported`));
+}
+
+export default app;
